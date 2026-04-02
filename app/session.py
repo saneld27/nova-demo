@@ -42,6 +42,7 @@ class RevitSession:
         loop = asyncio.get_event_loop()
         fut: asyncio.Future[Any] = loop.create_future()
         self._pending[call_id] = fut
+        logger.debug("Registered pending call call_id=%s session=%s pending=%d", call_id, self.session_id, len(self._pending))
         return fut
 
     def resolve_call(self, call_id: str, result: Any) -> bool:
@@ -51,19 +52,20 @@ class RevitSession:
         """
         fut = self._pending.pop(call_id, None)
         if fut is None:
-            logger.warning("resolve_call: unknown call_id=%r", call_id)
+            logger.warning("resolve_call: unknown call_id=%r session=%s", call_id, self.session_id)
             return False
         if fut.done():
-            logger.warning("resolve_call: future already done for call_id=%r", call_id)
+            logger.warning("resolve_call: future already done call_id=%r session=%s", call_id, self.session_id)
             return False
         fut.set_result(result)
+        logger.debug("Resolved call_id=%s session=%s remaining_pending=%d", call_id, self.session_id, len(self._pending))
         return True
 
     def cancel_pending(self) -> None:
         """Cancel all pending futures (called on session teardown)."""
-        for fut in self._pending.values():
-            if not fut.done():
-                fut.cancel()
+        cancelled = sum(1 for fut in self._pending.values() if not fut.done() and fut.cancel())
+        if cancelled:
+            logger.warning("Cancelled %d pending tool call(s) on session teardown session=%s", cancelled, self.session_id)
         self._pending.clear()
 
     async def emit(self, event: dict[str, Any]) -> None:
@@ -90,7 +92,7 @@ class SessionManager:
         sid = session_id or str(uuid.uuid4())
         session = RevitSession(session_id=sid)
         self._sessions[sid] = session
-        logger.debug("Session created: %s", sid)
+        logger.info("Session created: %s (active=%d)", sid, len(self._sessions))
         return session
 
     def get(self, session_id: str) -> RevitSession | None:
@@ -105,7 +107,7 @@ class SessionManager:
         session = self._sessions.pop(session_id, None)
         if session:
             session.cancel_pending()
-            logger.debug("Session removed: %s", session_id)
+            logger.info("Session removed: %s (active=%d)", session_id, len(self._sessions))
 
 
 # Global singleton – imported by tools and routes

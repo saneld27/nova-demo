@@ -27,6 +27,15 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+# ── Root health alias (no prefix) so plugin + docker healthcheck both work ───
+root_router = APIRouter(tags=["nova"])
+
+
+@root_router.get("/health", include_in_schema=False)
+async def root_health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 # ── Chat (streaming) ─────────────────────────────────────────────────────────
 
 
@@ -45,19 +54,29 @@ async def chat_stream(
 
     The Revit plugin should consume this stream and render tokens progressively.
     """
-    logger.info("Chat request from sub=%s session=%s", current_user.sub, request.session_id)
+    logger.info(
+        "Chat request from sub=%s session=%s message_preview=%r context_keys=%s",
+        current_user.sub,
+        request.session_id,
+        request.message[:120],
+        list(request.context.keys()) if request.context else [],
+    )
 
     async def event_generator():
+        chunk_count = 0
         async for chunk in run_agent_stream(
             message=request.message,
             context=request.context,
             settings=settings,
             session_id=request.session_id,
         ):
+            chunk_count += 1
+            logger.debug("SSE chunk #%d type=%s session=%s", chunk_count, chunk.type, request.session_id)
             yield {
                 "event": chunk.type,
                 "data": json.dumps(chunk.model_dump(exclude_none=True)),
             }
+        logger.info("SSE stream closed session=%s total_chunks=%d", request.session_id, chunk_count)
 
     return EventSourceResponse(event_generator())
 
@@ -82,11 +101,19 @@ async def submit_tool_result(
         from fastapi import HTTPException, status
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
+    logger.info(
+        "Tool result received session=%s call_id=%s result_preview=%r",
+        session_id,
+        payload.call_id,
+        str(payload.result)[:200],
+    )
     resolved = session.resolve_call(payload.call_id, payload.result)
     if not resolved:
         from fastapi import HTTPException, status
+        logger.warning("Unknown or already-resolved call_id=%s session=%s", payload.call_id, session_id)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unknown or already-resolved call_id")
 
+    logger.debug("Future resolved for call_id=%s session=%s", payload.call_id, session_id)
     return {"status": "ok"}
 
 
